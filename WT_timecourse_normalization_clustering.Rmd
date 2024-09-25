@@ -1,0 +1,184 @@
+---
+title: "WT_timecourse_normalization_clustering"
+author: "sara"
+date: "2023-06-16"
+output: html_document
+---
+
+#Setup
+```{r setup echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(SeuratDisk)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(pheatmap)
+library(SeuratWrappers)
+library(monocle3)
+
+knitr::opts_knit$set(root.dir = '/home/sarag/tchandra-lab/Sara/projects/timecourse')
+
+```
+
+
+
+#Normalizatoin and variable features ////////////////////
+```{r}
+#Normalization
+DefaultAssay(data_reduced) <- "RNA"
+data_reduced <- NormalizeData(data_reduced, normalization.method = "LogNormalize", scale.factor = 10000)
+data_reduced <- FindVariableFeatures(data_reduced, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(data_reduced), 10)
+
+# plot variable features with and without labels
+setwd("/home/sarag/tchandra-lab/Sara/projects/timecourse/reduced_data/variable_dims")
+pdf("top_variables.pdf")
+plot1 <- VariableFeaturePlot(data_reduced)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot2
+dev.off
+
+all.genes <- rownames(data_reduced)
+data_reduced <- ScaleData(data_reduced, features = all.genes,   scale.max = 20)
+data_reduced <- RunPCA(data_reduced, features = VariableFeatures(object = data_reduced))
+data_reduced <- JackStraw(data_reduced, dims = 20, num.replicate = 100)
+data_reduced <- ScoreJackStraw(data_reduced, dims = 1:20)
+JackStrawPlot(data_reduced, dims = 1:20)
+ElbowPlot(data_reduced)
+
+setwd("/home/sarag/tchandra-lab/Sara/projects/timecourse/reduced_data/variable_dims")
+pdf("jackstraw.pdf")
+JackStrawPlot(data_reduced, dims = 1:20)
+dev.off
+
+pdf("elbowplot.pdf")
+ElbowPlot(data_reduced)
+dev.off
+
+VizDimLoadings(data_reduced, dims = 1:2, reduction = "pca")
+setwd("/home/sarag/tchandra-lab/Sara/projects/timecourse/reduced_data/variable_dims")
+pdf("dimheatmap.pdf", height=7, width=10)
+DimHeatmap(data_reduced, dims = 1:9, cells = 500, balanced = TRUE)
+dev.off
+```
+
+
+#UMAP ////////////
+```{r}
+data_reduced <- FindNeighbors(data_reduced, dims = 1:10)
+data_reduced <- FindClusters(data_reduced, resolution = 0.48) 
+data_reduced <- RunUMAP(data_reduced, dims = 1:10)
+DimPlot(data_reduced, reduction = "umap", label=TRUE, label.box=TRUE)
+```
+
+
+#Re-filtering ////////////
+```{r}
+#Cluster 10 was actually just low quality cells so needed to re-filter 
+violin_pre <- VlnPlot(data_reduced, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0)
+violin_pre
+
+scatter1_pre <- FeatureScatter(data_reduced, feature1 = "nCount_RNA", feature2 = "percent.mt")
+scatter2_pre <- FeatureScatter(data_reduced, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+scatter1_pre + scatter2_pre
+
+data_reduced <- subset(data_reduced, subset = percent.mt < 6 & nCount_RNA > 3500)
+
+violin_pre <- VlnPlot(data_reduced, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0, group.by="orig.ident")
+violin_pre
+```
+
+
+#Label clusters with new cluster IDs ///////////////
+```{r fig.height=8, fig.width=15}
+new.cluster.ids <- c("Intermediate_2","Early-PGCLCs", "5h", "ExM2", "Mesoderm", "EpiLCs", "Epithelia", "Intermediate_1", "ExM1", "Late-PGCLCs", "Vascular")
+names(new.cluster.ids) <- levels(data_reduced)
+data_reduced <- RenameIdents(data_reduced, new.cluster.ids)
+
+data_reduced$clusterID <- data_reduced@active.ident
+table(data_reduced$clusterID)
+data_reduced$clusterID <- factor(data_reduced$clusterID, 
+  levels = c("EpiLCs","5h","Intermediate_1", "Intermediate_2", "Early-PGCLCs", "Late-PGCLCs", "Mesoderm", "Epithelia",  "ExM1", "ExM2", "Vascular"))
+
+DimPlot(data_reduced, reduction = "umap", label=TRUE, label.box=TRUE)
+
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis")
+pdf("UMAP_withlabels.pdf", height=8, width= 15 )
+DimPlot(data_reduced, reduction = "umap", label=FALSE, label.box=FALSE)
+dev.off()
+```
+
+
+#Create stacked barplots comparing the number of cells in each cluster vs the nubmer of cells in each time point ////////////
+```{r}
+metada <- data_reduced@meta.data
+metada_less <- metada[ ,c("clusterID", "CMO_assigment_Sara")]
+table(metada_less$CMO_assigment_Sara)
+
+# Reorder the factor levels 
+metada_less$CMO_assigment_Sara <- factor(metada_less$CMO_assigment_Sara, levels = c("Other", "day_6", "fourty_eight_hours","thirty_two_hours","sixteen_hours" ))
+
+metada_less$clusterID <- factor(metada_less$clusterID, levels = c("Intermediate_1", "Intermediate_2", "Late-PGCLCs", "ExM1", "ExM2"))
+
+# Plotting the data
+cluster_plot <- ggplot(metada_less, aes(x = factor(clusterID),
+                                         fill = factor(CMO_assigment_Sara)
+                                         )) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(
+    breaks = c("Other", "day_6","fourty_eight_hours",
+               "thirty_two_hours","sixteen_hours" ),
+    values = c("day_6" = "#330000",
+               "fourty_eight_hours" = "#990000",
+               "thirty_two_hours" = "#FF3300",
+               "sixteen_hours" = "#FF9999",
+               "Other" = "white")
+  ) +
+  labs(x = "", y = "Percentage (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Stacked Bar Plot of Cluster by Time-point") +
+  scale_y_continuous(labels = scales::percent_format(scale = 100))
+cluster_plot
+
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis")
+pdf("proportion_barplot_NEW_new.pdf")
+cluster_plot
+dev.off
+```
+
+#Unbiased selection of Markers for each cluster ////////////////////
+```{r}
+markers_epi <- FindMarkers(data_reduced, ident.1 = "EpiLCs" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_5h <- FindMarkers(data_reduced, ident.1 = "5h" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_Int_mes <- FindMarkers(data_reduced, ident.1 = "Intermediate_2" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_Int_PG <- FindMarkers(data_reduced, ident.1 = "Intermediate_1" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_PGCLC_late <- FindMarkers(data_reduced, ident.1 = "Late-PGCLCs" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_PGCLC_early <- FindMarkers(data_reduced, ident.1 = "Early-PGCLCs" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_Mesoderm <- FindMarkers(data_reduced, ident.1 = "Mesoderm" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_epithelia <- FindMarkers(data_reduced, ident.1 = "Epithelia" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_ExM1 <- FindMarkers(data_reduced, ident.1 = "ExM1" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_ExM2 <- FindMarkers(data_reduced, ident.1 = "ExM2" , min.pct = 0.25, logfc.threshold = 0.25)
+markers_vascular <- FindMarkers(data_reduced, ident.1 = "Vascular" , min.pct = 0.25, logfc.threshold = 0.25)
+
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis/markers")
+write.csv(markers_epi, "markers_epiLC_cluster.csv")
+write.csv(markers_5h, "markers_5h_cluster.csv")
+write.csv(markers_Int_mes, "markers_intermediate_to_mesoderm.csv")
+write.csv(markers_Int_PG, "markers_intermedaite_to_PGCLC.csv")
+write.csv(markers_PGCLC_early, "markers_PGCLC_early_cluster.csv")
+write.csv(markers_PGCLC_late, "markers_PGCLC__late_cluster.csv")
+write.csv(markers_Mesoderm, "markers_mesoderm_cluster.csv")
+write.csv(markers_ExM1, "markers_ExM1_cluster.csv")
+write.csv(markers_ExM2, "markers_ExM2_cluster.csv")
+write.csv(markers_vascular, "markers_vascular.csv")
+write.csv(markers_epithelia, "markers_epithelia.csv")
+```
+```
+
