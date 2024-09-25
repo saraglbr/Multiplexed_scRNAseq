@@ -1,0 +1,256 @@
+---
+title: "WT_timecourse_pseudotime"
+author: "sara"
+date: "2023-06-16"
+output: html_document
+---
+
+#Setup
+```{r setup echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(SeuratDisk)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(pheatmap)
+library(SeuratWrappers)
+library(monocle3)
+
+knitr::opts_knit$set(root.dir = '/home/sarag/tchandra-lab/Sara/projects/timecourse')
+
+```
+
+#Transform seurat object into monocle3 object and calculate trajectory and pseudotime (2D)
+```{r}
+cds <- as.cell_data_set(data_reduced)
+cds <- cluster_cells(cds)
+cds <- reduce_dimension(cds, max_components = 2)
+cds <- cluster_cells(cds = cds, reduction_method = "UMAP",
+                            resolution = 0.0005)
+plot_cells(cds, color_cells_by="cluster")
+cds <- learn_graph(cds, use_partition = TRUE, close_loop = FALSE)
+cds <- order_cells(cds)
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis")
+pdf("pseudotime.pdf")
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=1.5)
+dev.off
+```
+
+#Check for expression of main markers to identiy each branch in relationship to previosly defined clusters
+```{r}
+rowData(cds)$gene_short_name <- rownames(GetAssayData(data_reduced, slot = "data"))
+plot_cells(cds,
+           genes=c("Otx2", "Fgf5"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+plot_cells(cds,
+           genes=c("T", "Zeb2"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+plot_cells(cds,
+           genes=c("Tfap2c", "Esrrb", "Prdm1", "Stra8"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+```
+
+#Calculate pseudotime only in cells found within the germline branch
+```{r fig.height=4, fig.width=7}
+#subset seurat object based on clusters to only include those within the germline branch
+data_subset <- subset(data_reduced, idents=c("0", "9", "2"))
+DimPlot(data_subset, reduction = "umap", label=TRUE, label.box=TRUE)
+
+#Use this subseted dataset in monocle3 to calculate trajectory and pseudotime
+cds <- as.cell_data_set(data_subset)
+cds <- reduce_dimension(cds, max_components = 2)
+cds <- cluster_cells(cds = cds, reduction_method = "UMAP",
+                            resolution = 0.0005)
+plot_cells(cds, color_cells_by="cluster")
+cds <- learn_graph(cds, use_partition = TRUE, close_loop = FALSE)
+rowData(cds)$gene_short_name <- rownames(GetAssayData(data_reduced, slot = "data"))
+#Check expression of main markers again to determine "root" 
+plot_cells(cds,
+           genes=c("Otx2", "Fgf5"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+plot_cells(cds,
+           genes=c("Tfap2c", "Esrrb", "Prdm1", "Stra8"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+
+cds <- order_cells(cds)
+
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=1.5)
+
+#Extract pseudotime scores from the monocle3 object
+pseudotime <- cds@principal_graph_aux@listData$UMAP$pseudotime
+
+# Add pseudotime to Seurat object metadata
+data_subset@meta.data$Pseudotime <- pseudotime[rownames(data_subset@meta.data)]
+
+# Extract metadata and add cell_names
+metada <- data_subset@meta.data
+metada$cell_names <- row.names(metada)
+
+# Extract pseudotime and expression of top genes
+pseudotime <- metada[, c("cell_names", "Pseudotime")]
+top_genes <- c("Otx2", "Fgf5", "Pim2","Lefty1", "Lgr4", "Grip1", "Tfap2c", "Tfcp2l1", "Esrrb", "Nr5a2",  "Prdm14", "Prdm1", "Stra8")
+expression_data <- as.data.frame(GetAssayData(data_subset, slot = "scale.data")[top_genes, ])
+expression_data_t <- t(expression_data)
+
+# Transpose expression data
+colnames(expression_data_t) <- rownames(expression_data)
+expression_data_t <- as.data.frame(expression_data_t)
+expression_data_t$cell_names <- rownames(expression_data_t)
+
+# Merge expression data with pseudotime
+merged_data <- merge(expression_data_t, pseudotime, by = "cell_names")
+
+# Sort merged data by pseudotime
+sorted_data <- merged_data[order(merged_data$Pseudotime),]
+
+# Drop unnecessary columns and set row names
+row.names(sorted_data) <- sorted_data$cell_names
+sorted_expression_data <- sorted_data[, top_genes]
+sorted_expression_data <- t(sorted_expression_data)
+
+# Create an annotation dataframe for cells based on time points
+metada <- data_subset@meta.data
+metada$cell_names <- row.names(metada)
+column_annotations <- metada[ ,c("cell_names", "CMO_assigment_Sara")]
+row.names(column_annotations) <- column_annotations$cell_names
+column_annotations <- column_annotations[, "CMO_assigment_Sara", drop = FALSE]  # Ensure it's a dataframe with one column
+
+annotation_colors <- list(
+  CMO_assigment_Sara = c("day_6" = "#330000",
+               "fourty_eight_hours" = "#990000",
+               "thirty_two_hours" = "#FF3300",
+               "sixteen_hours" = "#FF9999",
+               "five_hours" = "#999999",
+               "Epi" = "#333333")
+  ) 
+
+# Generate heatmap of expression of top genes, organized by pseudotime, and annotated by real time point cell was collected at
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis")
+pdf("heatmap_pseudotime_germline_subset.pdf",  height=4, width=10)
+pheatmap(sorted_expression_data,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         color =  magma(50),
+         annotation_col = column_annotations,
+         annotation_colors = annotation_colors)
+dev.off()
+
+```
+
+
+
+#Calculate pseudotime only in cells found within the SOMATIC branch
+```{r fig.height=4, fig.width=7}
+#subset seurat object based on clusters to only include those within the SOMATIC branch
+data_subset <- subset(data_reduced, idents=c("0", "1", "5","6", "10", "4"))
+DimPlot(data_subset, reduction = "umap", label=TRUE, label.box=TRUE)
+
+#Use this subseted dataset in monocle3 to calculate trajectory and pseudotime
+cds <- as.cell_data_set(data_subset)
+cds <- reduce_dimension(cds, max_components = 2)
+cds <- cluster_cells(cds = cds, reduction_method = "UMAP",
+                            resolution = 0.0005)
+plot_cells(cds, color_cells_by="cluster")
+cds <- learn_graph(cds, use_partition = TRUE, close_loop = FALSE)
+rowData(cds)$gene_short_name <- rownames(GetAssayData(data_reduced, slot = "data"))
+#Check expression of main markers again to determine "root" 
+plot_cells(cds,
+           genes=c("Otx2", "Fgf5"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+plot_cells(cds,
+           genes=c("T", "Zeb2"),
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE)
+
+cds <- order_cells(cds)
+
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=TRUE,
+           label_branch_points=TRUE,
+           graph_label_size=1.5)
+
+#Extract pseudotime scores from the monocle3 object
+pseudotime <- cds@principal_graph_aux@listData$UMAP$pseudotime
+
+# Add pseudotime to Seurat object metadata
+data_subset@meta.data$Pseudotime <- pseudotime[rownames(data_subset@meta.data)]
+
+# Extract metadata and add cell_names
+metada <- data_subset@meta.data
+metada$cell_names <- row.names(metada)
+
+# Extract pseudotime and expression of top genes
+pseudotime <- metada[, c("cell_names", "Pseudotime")]
+top_genes <- c("Otx2", "Fgf5", "Pim2", "Lefty1",  "Lgr4", "Grip1","Zeb2","Fgf8","T", "Mixl1","Vim", "Wnt3a", "Wnt5a")
+expression_data <- as.data.frame(GetAssayData(data_subset, slot = "scale.data")[top_genes, ])
+expression_data_t <- t(expression_data)
+
+# Transpose expression data
+colnames(expression_data_t) <- rownames(expression_data)
+expression_data_t <- as.data.frame(expression_data_t)
+expression_data_t$cell_names <- rownames(expression_data_t)
+
+# Merge expression data with pseudotime
+merged_data <- merge(expression_data_t, pseudotime, by = "cell_names")
+
+# Sort merged data by pseudotime
+sorted_data <- merged_data[order(merged_data$Pseudotime),]
+
+# Drop unnecessary columns and set row names
+row.names(sorted_data) <- sorted_data$cell_names
+sorted_expression_data <- sorted_data[, top_genes]
+sorted_expression_data <- t(sorted_expression_data)
+
+# Create an annotation dataframe for cells based on time points
+metada <- data_subset@meta.data
+metada$cell_names <- row.names(metada)
+column_annotations <- metada[ ,c("cell_names", "CMO_assigment_Sara")]
+row.names(column_annotations) <- column_annotations$cell_names
+column_annotations <- column_annotations[, "CMO_assigment_Sara", drop = FALSE]  # Ensure it's a dataframe with one column
+
+annotation_colors <- list(
+  CMO_assigment_Sara = c("day_6" = "#330000",
+               "fourty_eight_hours" = "#990000",
+               "thirty_two_hours" = "#FF3300",
+               "sixteen_hours" = "#FF9999",
+               "five_hours" = "#999999",
+               "Epi" = "#333333")
+  ) 
+
+# Generate heatmap of expression of top genes, organized by pseudotime, and annotated by real time point cell was collected at
+setwd("/mnt/tchandra-lab/Sara/projects/timecourse/thesis_analysis")
+pdf("heatmap_pseudotime_somatic.pdf",  height=4, width=8)
+pheatmap(sorted_expression_data,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         color = magma(50),
+         annotation_col = column_annotations,
+         annotation_colors = annotation_colors)
+dev.off()
+```
