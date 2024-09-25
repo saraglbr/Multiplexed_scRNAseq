@@ -1,0 +1,102 @@
+---
+title: "WT_timecourse_map_to_atlas"
+author: "sara"
+date: "2023-06-16"
+output: html_document
+---
+
+#Setup
+```{r setup echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(SeuratDisk)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(pheatmap)
+library(SeuratWrappers)
+library(monocle3)
+
+library("MouseGastrulationData") #Load Mouse Gastrulation Atlas (Pijuan-Sala, et al. 2019)
+library(patchwork)    
+library(scuttle)
+library(SingleR)
+
+knitr::opts_knit$set(root.dir = '/home/sarag/tchandra-lab/Sara/projects/timecourse')
+
+```
+
+#Download relevant data from Mouse gastrulation Atlas and organize into compatible format////////////
+```{r}
+#Assess the samples and time points available in the atlas 
+AtlasSampleMetadata
+#sce <- EmbryoAtlasData(samples = c(19, 2, 3, 4, 6, 20))  # For samples 7.5
+sce <- EmbryoAtlasData(samples = c(10, 14, 15, 30, 31, 32)) #7
+sce <- logNormCounts(sce)
+atlas <- as.Seurat(sce) #convert to seurat object
+
+#Select Symbol as the identifiers for genes
+rownames(atlas@assays$originalexp@counts) <- rowData(sce)[ ,"SYMBOL"]
+rownames(atlas@assays$originalexp@data) <- rowData(sce)[ ,"SYMBOL"]
+head(atlas@assays$originalexp@counts)
+head(atlas@assays$originalexp@data)
+
+#Check the cell types that are in this dataset and set as the active.ident in Seurat object
+table(atlas@meta.data$celltype)
+atlas@active.ident <- as.factor(atlas@meta.data$celltype)
+table(atlas@active.ident)
+```
+
+
+#Scaling and dimensionality reduciton of reference atlas ///////
+```{r}
+atlas <- FindVariableFeatures(atlas, selection.method = "vst", nfeatures = 2000)
+all.genes <- rownames(atlas)
+atlas <- ScaleData(atlas, features = all.genes)
+atlas <- RunPCA(atlas, features = VariableFeatures(object = atlas))
+ElbowPlot(data_reduced)
+
+atlas <- FindNeighbors(atlas, dims = 1:10)
+atlas <- FindClusters(atlas, resolution = 1) #0.2 res for 8 clusters
+atlas <- RunUMAP(atlas, dims = 1:10)
+DimPlot(atlas, reduction = "umap", label=TRUE, label.box=TRUE)
+DimPlot(atlas, reduction = "umap", label=TRUE, group.by="celltype")
+
+atlas@active.ident <- as.factor(atlas@meta.data$celltype)
+table(atlas@active.ident)
+```
+
+#Map data to the atlas using singleR///////////////////////
+```{r}
+preddictionsSR <- SingleR(test=data_reduced, ref=atlas, labels=atlas@meta.data$celltype, de.method="wilcox")
+table(preddictionsSR$labels)
+```
+
+#Visualized the mapped IDs in relationship with previosly defined clusters//////////
+```{r}
+#Add singleR labels as a column on metadata
+data_reduced <- AddMetaData(data_reduced, metadata = predictionsSR$labels, col.name = "predicted.id")
+
+#Visualize predicted IDs on UMAP
+DimPlot(data_reduced, reduction="umap", group.by="predicted.id")
+
+#Select the cluster and predicted ID columns from metadata
+metada <- data_reduced@meta.data
+metada_less <- metada[ ,c("cluster", "predicted.id")]
+
+# Create a stacked bar plot to compare clusters and predicted IDs
+plot <- ggplot(metada_less, aes(x = factor(cluster), fill = factor(predicted.id))) +
+  geom_bar(position = "fill") +
+  labs(x = "Time point", y = "Percentage") +
+  scale_fill_discrete(name = "Clusters") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Stacked Bar Plot of predictions per cluster") +
+  scale_y_continuous(labels = scales::percent_format(scale = 100))
+
+plot
+
+```
