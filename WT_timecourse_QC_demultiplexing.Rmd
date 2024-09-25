@@ -1,0 +1,218 @@
+---
+title: "WT_timecourse_QC_demultiplexing"
+author: "sara"
+date: "2023-06-16"
+output: html_document
+---
+
+scRNA-seq timecoure during PGCLCs induction
+
+The data consist of 6 samples all collected at different points during PGCLC induction in wild type cells:
+
+-   EpiLCs, 5h, 16h, 32, 48h and Day 6.
+
+All samples were collected and stain with CMO oligos. They were then pooled on a 1:1 ratio and processed together for microfluidics and library prep. After sequencing (of both the GEX and MP libraries, details bellow). Cell ranger multi was run on the fastqc files
+
+#Setup
+```{r setup echo=FALSE}
+library(Seurat)
+library(dplyr)
+library(SeuratDisk)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(ggplot2)
+library(reshape2)
+library(viridis)
+library(pheatmap)
+library(SeuratWrappers)
+library(monocle3)
+
+knitr::opts_knit$set(root.dir = '/home/sarag/tchandra-lab/Sara/projects/timecourse')
+
+```
+
+
+##Loading data
+We load ALL cells using the "unlabelled" folder on the cell ranger outs. This contains all cells with no extra filtering. We then create a Seurat object with two Assays in:
+  Gene expression - which will contains the RNA-seq (GEX library)
+  Multiplexing capture- which contains the reads for the CMO tags (MP library)
+  
+```{r}
+setwd("/home/sarag/tchandra-lab/Sara/projects/timecourse")
+data_pbmc_all <- Read10X("raw_fearture_bc_matrix", unique.features = TRUE)
+pbmc_all <- CreateSeuratObject(counts = data_pbmc_all[["Gene Expression"]], project = "unlabelled")
+pbmc_all[['CMO']] = CreateAssayObject(counts = data_pbmc_all[["Multiplexing Capture"]])
+rm(data_pbmc_all)
+```
+
+##Quality control
+
+#standard RNA-seq clean up steps ///////////////////
+```{r fig.width=7}
+DefaultAssay(pbmc_all) <- "RNA"
+pbmc_all[["percent.mt"]] <- PercentageFeatureSet(pbmc_all, pattern = "^mt-")
+
+#Asess spread of the raw data
+violin_pre <- VlnPlot(pbmc_all, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0)
+violin_pre
+scatter1_pre <- FeatureScatter(pbmc_all, feature1 = "nCount_RNA", feature2 = "percent.mt")
+scatter2_pre <- FeatureScatter(pbmc_all, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+scatter1_pre + scatter2_pre
+
+#Filter cells to remove empty droplets, doublets and bad quality cells
+pbmc_all_filter <- subset(pbmc_all, subset = nFeature_RNA > 1500 & nFeature_RNA < 9000 & percent.mt < 11 & nCount_RNA < 80000)
+
+#Asess spread of the data after filtering
+violin_post <- VlnPlot(pbmc_all_filter, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size=0)
+violin_post
+scatter1_post <- FeatureScatter(pbmc_all_filter, feature1 = "nCount_RNA", feature2 = "percent.mt")
+scatter2_post <- FeatureScatter(pbmc_all_filter, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+scatter1_post + scatter2_post
+```
+
+
+
+
+
+#Sample demultiplexing ///////////////////////////
+
+We focus on the different CMO tags used. Each CMO has a different scale - signal for CMO312 is several orders higher than the signal for CMO307. So the standard tag calling used by cell ranger runs into problems identifying each cell. We therefore decided to asign cells by hand looking at the levels of each CMO. IDentified all cells above the top quartile as "true signal", and discarted every cell that was "positive" for more than one true signal. 
+
+```{r fig.height= 7, fig.width=8}
+DefaultAssay(pbmc_all_filter) <- "CMO"
+VlnPlot(pbmc_all_filter, features = c("CMO307", "CMO308", "CMO309", "CMO310", "CMO311", "CMO312"), pt.size=0) #Check the overal levels for each CMO used
+```
+
+
+By treating CMOs as normal features (like they are gene expression) we found by setting different cut offs on the signal we found a pattern that agreed on the UMAP with the temporal distribution of the data. Once we looked at gene expression further down the analysis this distribution also agreed with the expression of expected markers for each sample. 
+```{r}
+DefaultAssay(pbmc_all_filter) <- "CMO"
+pbmc_all_filter <- NormalizeData(pbmc_all_filter, normalization.method = "LogNormalize", scale.factor = 10000)
+FeaturePlot(pbmc_all_filter, features =c("CMO312", "CMO311", "CMO307", "CMO308"),
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO312"), min.cutoff = 7,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO311"), min.cutoff = 6.5,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO310"), min.cutoff = 5.9,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO309"), min.cutoff = 6,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO308"), min.cutoff = 4.7,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+FeaturePlot(pbmc_all_filter, features =c("CMO307"), min.cutoff = 4.7,
+            cols = c("white", "cadetblue2", "red"), keep.scale = NULL)
+```
+
+
+In order to obtain more unbiased cut-offs that were not motivated by expression patterns we fetcth the data and got simple statistics to find the median, and upper and lower quartiles for each CMOs. 
+```{r fig.height=2}
+VlnPlot(pbmc_all_filter, features = c("CMO312", "CMO311" , "CMO310", "CMO309", "CMO308", "CMO307"), group.by = "orig.ident", pt.size=0, same.y.lims = TRUE)
+cmo_counts <- FetchData (object = pbmc_all_filter, vars =  c("CMO312", "CMO311" , "CMO310", "CMO309", "CMO308", "CMO307"))
+# Create a boxplot
+ggplot(melt(cmo_counts), aes(x = factor(variable), y = value)) +
+  geom_boxplot() +
+  labs(x = "CMO", y = "Values") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("Boxplot of CMO Values")
+
+summary(cmo_counts)
+```
+
+
+We then got the upper quartile number and assigned all cells with a higher value for that CMO
+```{r}
+#This code creates a new column on the metadata of the Seurat object for each time point, assigning cells to either the specific time point label (e.g "Epi") or "no" 
+epilcs <- WhichCells(pbmc_all_filter, expression = CMO307 > 6.5)
+pbmc_all_filter$epi<- ifelse(colnames(pbmc_all_filter) %in% epilcs, "Epi", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="epi", cols = c("darkorchid2", "khaki3")) + NoLegend()
+
+five_hours <- WhichCells(pbmc_all_filter, expression = CMO308 > 6.5)
+pbmc_all_filter$five_hours<- ifelse(colnames(pbmc_all_filter) %in% five_hours, "five_hours", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="five_hours", cols = c("darkorchid2", "khaki3")) + NoLegend()
+
+sixteen_hours <- WhichCells(pbmc_all_filter, expression = CMO309 > 7.5)
+pbmc_all_filter$sixteen_hours<- ifelse(colnames(pbmc_all_filter) %in% sixteen_hours, "sixteen_hours", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="sixteen_hours", cols = c("khaki3", "darkorchid2"))  + NoLegend()
+
+thirty_two_hours <- WhichCells(pbmc_all_filter, expression = CMO310 > 7.5)
+pbmc_all_filter$thirty_two_hours<- ifelse(colnames(pbmc_all_filter) %in% thirty_two_hours, "thirty_two_hours", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="thirty_two_hours", cols = c("khaki3", "darkorchid2")) + NoLegend()
+
+
+fourty_eight_hours <- WhichCells(pbmc_all_filter, expression = CMO311 > 8)
+pbmc_all_filter$fourty_eight_hours<- ifelse(colnames(pbmc_all_filter) %in% fourty_eight_hours, "fourty_eight_hours", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="fourty_eight_hours", cols = c("darkorchid2", "khaki3"))  + NoLegend()
+
+day_6 <- WhichCells(pbmc_all_filter, expression = CMO312 > 8.5)
+pbmc_all_filter$day_6 <- ifelse(colnames(pbmc_all_filter) %in% day_6 , "day_6", "no")
+DimPlot(pbmc_all_filter, reduction="umap", group.by="day_6", cols = c("darkorchid2", "khaki3"))  + NoLegend()
+```
+
+
+```{r}
+#Create a dataframe from the metadata of the Seurat object with all the columsn that were just assigned per time point
+metada <- pbmc_all_filter@meta.data
+metada_cmos <- metada[, c("cluster", "epi", "five_hours", "sixteen_hours", "thirty_two_hours", "fourty_eight_hours", "day_6")]
+
+#Count the number of "no" assignment across all different idenitties
+metada_cmos <- metada_cmos %>%
+  mutate(
+    no_count = rowSums(select(., epi:day_6) == "no")
+  )
+
+#create a new column with the final assignment
+metada_cmos <- metada_cmos %>%
+  mutate(
+    combined = case_when(
+      epi != "no" ~ epi,
+      five_hours != "no" ~ five_hours,
+      sixteen_hours != "no" ~ sixteen_hours,
+      thirty_two_hours != "no" ~ thirty_two_hours,
+      fourty_eight_hours != "no" ~ fourty_eight_hours,
+      day_6 != "no" ~ day_6,
+      TRUE ~ NA_character_
+    ))
+
+#Change the assignement to "delete" if the number of "no" does not equal 5 (means that there is more than one "true" assigment)
+metada_cmos <- metada_cmos %>%
+    mutate(
+    asign = ifelse(no_count ==5, combined, "delete" )
+  )
+
+#select only key columns and discard all others
+metada_cmos_less <- metada_cmos[ ,c("cluster", "asign")]
+
+#Add assignment to the seurat object as a column on the meatadata
+labels <- as.data.frame(metada_cmos_less)["asign"]
+pbmc_all_filter <- AddMetaData(pbmc_all_filter, labels, col.name="CMO_assigment_Sara")
+
+#Remove all cells from the seurat object that were assigned as "delete"
+data_reduced <- subset(x = pbmc_all_filter, subset = CMO_assigment_Sara == "delete", invert= TRUE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
